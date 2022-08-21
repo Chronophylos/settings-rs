@@ -7,9 +7,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use directories::ProjectDirs;
 use log::debug;
 use ron::ser::PrettyConfig;
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Serialize};
 
 /// Error type used for all errors in this crate.
 #[derive(Debug, thiserror::Error)]
@@ -32,6 +33,9 @@ pub enum Error {
     /// Emitted when the settings file is not found.
     #[error("Cound not find a settings file")]
     NotFound,
+
+    #[error("Could not find project directory")]
+    ProjectDirs,
 }
 
 /// A wrapper around a configuration struct.
@@ -64,17 +68,18 @@ pub enum Error {
 ///
 /// let content = std::fs::read_to_string(path)?;
 /// assert_eq!(content,
-/// r#"Config(
+/// r#"(
 ///     foo: "Hello World",
 ///     bar: 42,
 /// )"#);
 /// # Ok(())
 /// # }
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Settings<T> {
     path: PathBuf,
     inner: T,
+    project_dirs: ProjectDirs,
 }
 
 impl<T> Settings<T>
@@ -98,29 +103,30 @@ where
     /// ```
     pub fn load(qualifier: &str, organization: &str, application: &str) -> Result<Self, Error> {
         const FILE_NAME: &str = "settings.ron";
+        let project_dirs =
+            ProjectDirs::from(qualifier, organization, application).ok_or(Error::ProjectDirs)?;
 
         let paths = [
             env::var(format!("{}_CONFIG_PATH", application.to_uppercase()))
                 .ok()
                 .map(PathBuf::from),
             env::current_dir().ok().map(|dir| dir.join(FILE_NAME)),
-            directories::ProjectDirs::from(qualifier, organization, application)
-                .map(|dir| dir.config_dir().join(FILE_NAME)),
+            Some(project_dirs.config_dir().join(FILE_NAME)),
         ];
 
         if let Some(path) = paths.into_iter().flatten().find(|path| path.exists()) {
-            Self::load_from(path)
+            Self::load_from(path, project_dirs)
         } else {
             Err(Error::NotFound)
         }
     }
 
     /// Load the settings file from the given path.
-    pub fn load_from<P>(path: P) -> Result<Self, Error>
+    fn load_from<P>(path: P, project_dirs: ProjectDirs) -> Result<Self, Error>
     where
         P: AsRef<Path>,
     {
-        fn inner<T>(path: &Path) -> Result<Settings<T>, Error>
+        fn inner<T>(path: &Path, project_dirs: ProjectDirs) -> Result<Settings<T>, Error>
         where
             T: DeserializeOwned,
         {
@@ -137,9 +143,10 @@ where
             Ok(Settings {
                 path: path.to_path_buf(),
                 inner,
+                project_dirs,
             })
         }
-        inner(path.as_ref())
+        inner(path.as_ref(), project_dirs)
     }
 
     /// Save the settings to the last path used.
@@ -161,10 +168,14 @@ where
                 path: path.to_path_buf(),
             })?;
             let writer = BufWriter::new(file);
-            ron::ser::to_writer_pretty(writer, value, PrettyConfig::default().struct_names(true))
+            ron::ser::to_writer_pretty(writer, value, PrettyConfig::default())
                 .map_err(Error::Serialize)
         }
         inner(self.deref(), path.as_ref())
+    }
+
+    pub fn project_dirs(&self) -> &ProjectDirs {
+        &self.project_dirs
     }
 }
 
